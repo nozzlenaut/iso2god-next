@@ -180,6 +180,7 @@ jobs:
           mkdir -p "$dist/lib" "$dist/share/glib-2.0" "$dist/share/icons/hicolor/scalable/apps" out
 
           cp target/release/iso2god-next-gui.exe "$dist/"
+          cp START_GPU.bat PERFORMANCE.md "$dist/"
 
           # gdk-pixbuf image loaders (SVG icons need the librsvg one)
           cp -r /ucrt64/lib/gdk-pixbuf-2.0 "$dist/lib/"
