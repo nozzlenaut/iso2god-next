@@ -36,6 +36,16 @@ pub enum FileOutcome {
     Failed(String),
 }
 
+/// Discover ISO images off the GTK thread.
+pub fn scan_iso_folders(sender: ComponentSender<AppModel>, roots: Vec<PathBuf>) {
+    std::thread::spawn(move || {
+        let result = iso2god_next::iso_scan::discover_iso_files(
+            &roots, iso2god_next::iso_scan::ISO_SCAN_DEPTH,
+        );
+        sender.input(AppMsg::IsoScanFinished(result));
+    });
+}
+
 /// Reads metadata for every path, reporting each result as it arrives.
 pub fn inspect(sender: ComponentSender<AppModel>, paths: Vec<PathBuf>) {
     std::thread::spawn(move || {

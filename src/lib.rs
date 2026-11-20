@@ -5,6 +5,7 @@ pub mod game_list;
 pub mod god;
 pub mod icon;
 pub mod iso;
+pub mod iso_scan;
 
 pub use convert::{
     CancelToken, Cancelled, ConversionProgress, ConvertOptions, IsoInfo, SourceKind, Stage,
