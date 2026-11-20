@@ -540,9 +540,8 @@ impl SimpleComponent for AppModel {
                 self.scanning_iso_folders = false;
                 let count = result.files.len();
                 let skipped = result.unreadable;
-                self.update(AppMsg::FilesChosen(result.files), sender.clone());
-                let queued = self.entries.len();
-                self.toast(&format!("Found {count} ISO/XISO files; {queued} total queued{}.",
+                let added = self.enqueue_paths(result.files, &sender);
+                self.toast(&format!("Found {count} ISO/XISO files; {added} added to the queue{}.",
                     if skipped == 0 { String::new() } else { format!("; {skipped} unreadable entries skipped") }));
             }
 
@@ -552,33 +551,7 @@ impl SimpleComponent for AppModel {
                     return;
                 }
 
-                let mut known: HashSet<PathBuf> = self
-                    .entries
-                    .iter()
-                    .filter(|entry| !matches!(entry.state, EntryState::Failed(_)))
-                    .map(|entry| entry.path.clone())
-                    .collect();
-
-                let mut added = Vec::new();
-                for path in paths {
-                    let path = std::fs::canonicalize(&path).unwrap_or(path);
-                    if !(path.is_file() || path.is_dir()) || !known.insert(path.clone()) {
-                        continue;
-                    }
-
-                    // Re-adding a file that failed inspection retries it.
-                    if let Some(index) = self.entries.iter().position(|entry| entry.path == path) {
-                        self.entries.remove(index);
-                    }
-
-                    self.entries.push(IsoEntry::new(path.clone()));
-                    added.push(path);
-                }
-
-                if !added.is_empty() {
-                    self.reset_run_summary();
-                    task::inspect(sender.clone(), added);
-                }
+                self.enqueue_paths(paths, &sender);
             }
 
             AppMsg::Inspected(path, result) => {
@@ -913,6 +886,39 @@ impl SimpleComponent for AppModel {
 }
 
 impl AppModel {
+    /// Shared queue insertion for manual selection and recursive folder scans.
+    fn enqueue_paths(&mut self, paths: Vec<PathBuf>, sender: &ComponentSender<Self>) -> usize {
+        let mut known: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|entry| !matches!(entry.state, EntryState::Failed(_)))
+            .map(|entry| entry.path.clone())
+            .collect();
+
+        let mut added = Vec::new();
+        for path in paths {
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            if !(path.is_file() || path.is_dir()) || !known.insert(path.clone()) {
+                continue;
+            }
+
+            // Re-adding a file that failed inspection retries it.
+            if let Some(index) = self.entries.iter().position(|entry| entry.path == path) {
+                self.entries.remove(index);
+            }
+
+            self.entries.push(IsoEntry::new(path.clone()));
+            added.push(path);
+        }
+
+        let count = added.len();
+        if count != 0 {
+            self.reset_run_summary();
+            task::inspect(sender.clone(), added);
+        }
+        count
+    }
+
     fn convertible_count(&self) -> usize {
         self.entries
             .iter()
