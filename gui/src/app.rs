@@ -28,6 +28,9 @@ use crate::task::{self, FileOutcome, IconKind, Job};
 pub(crate) enum AppMsg {
     AddRequested,
     AddFolderRequested,
+    AddIsoFolderRequested,
+    IsoFoldersChosen(Vec<PathBuf>),
+    IsoScanFinished(iso2god_next::iso_scan::ScanResult),
     FilesChosen(Vec<PathBuf>),
     Inspected(PathBuf, Result<Box<IsoInfo>, String>),
     /// Ask for a picture to use as the icon of the game at this index.
@@ -87,6 +90,8 @@ pub(crate) struct AppModel {
     clear_button: Option<gtk::Button>,
     add_action: Option<gio::SimpleAction>,
     add_folder_action: Option<gio::SimpleAction>,
+    add_iso_folder_action: Option<gio::SimpleAction>,
+    scanning_iso_folders: bool,
     convert_action: Option<gio::SimpleAction>,
     cancel_action: Option<gio::SimpleAction>,
 }
@@ -115,6 +120,11 @@ impl SimpleComponent for AppModel {
                             set_action_name: Some("app.add"),
                         },
                         pack_start = &gtk::Button {
+                            set_label: "Add ISO Folder",
+                            set_tooltip_text: Some("Find ISO/XISO images up to four subfolders deep (Ctrl+Alt+O)"),
+                            set_action_name: Some("app.add-iso-folder"),
+                        },
+                        pack_start = &gtk::Button {
                             set_label: "Add XEX Folder",
                             set_tooltip_text: Some("Add folders that contain a default.xex (Ctrl+Shift+O)"),
                             set_action_name: Some("app.add-folder"),
@@ -140,6 +150,12 @@ impl SimpleComponent for AppModel {
                                     gtk::Button {
                                         set_label: "Add ISO images",
                                         set_action_name: Some("app.add"),
+                                        set_halign: gtk::Align::Start,
+                                        add_css_class: "flat",
+                                    },
+                                    gtk::Button {
+                                        set_label: "Add ISOs from folders",
+                                        set_action_name: Some("app.add-iso-folder"),
                                         set_halign: gtk::Align::Start,
                                         add_css_class: "flat",
                                     },
@@ -196,6 +212,10 @@ impl SimpleComponent for AppModel {
                                         set_label: "Add ISO images",
                                         set_action_name: Some("app.add"),
                                         add_css_class: "suggested-action",
+                                    },
+                                    gtk::Button {
+                                        set_label: "Add ISO folders",
+                                        set_action_name: Some("app.add-iso-folder"),
                                     },
                                     gtk::Button {
                                         set_label: "Add XEX folder",
@@ -360,6 +380,8 @@ impl SimpleComponent for AppModel {
             clear_button: None,
             add_action: None,
             add_folder_action: None,
+            add_iso_folder_action: None,
+            scanning_iso_folders: false,
             convert_action: None,
             cancel_action: None,
         };
@@ -412,6 +434,15 @@ impl SimpleComponent for AppModel {
         app.add_action(&add_folder_action);
         app.set_accels_for_action("app.add-folder", &["<primary><shift>o"]);
         model.add_folder_action = Some(add_folder_action);
+
+        let add_iso_folder_action = gio::SimpleAction::new("add-iso-folder", None);
+        let add_iso_folder_sender = sender.clone();
+        add_iso_folder_action.connect_activate(move |_, _| {
+            add_iso_folder_sender.input(AppMsg::AddIsoFolderRequested);
+        });
+        app.add_action(&add_iso_folder_action);
+        app.set_accels_for_action("app.add-iso-folder", &["<primary><alt>o"]);
+        model.add_iso_folder_action = Some(add_iso_folder_action);
 
         let choose_action = gio::SimpleAction::new("choose-output", None);
         let choose_sender = sender.clone();
@@ -487,7 +518,32 @@ impl SimpleComponent for AppModel {
                 if self.converting {
                     return;
                 }
-                self.open_folder_dialog(&sender);
+                self.open_folder_dialog(&sender, false);
+            }
+
+            AppMsg::AddIsoFolderRequested => {
+                if !self.converting && !self.scanning_iso_folders {
+                    self.open_folder_dialog(&sender, true);
+                }
+            }
+
+            AppMsg::IsoFoldersChosen(paths) => {
+                if self.converting || self.scanning_iso_folders {
+                    return;
+                }
+                self.scanning_iso_folders = true;
+                self.toast("Scanning folders up to four levels deep…");
+                task::scan_iso_folders(sender.clone(), paths);
+            }
+
+            AppMsg::IsoScanFinished(result) => {
+                self.scanning_iso_folders = false;
+                let count = result.files.len();
+                let skipped = result.unreadable;
+                self.update(AppMsg::FilesChosen(result.files), sender.clone());
+                let queued = self.entries.len();
+                self.toast(&format!("Found {count} ISO/XISO files; {queued} total queued{}.",
+                    if skipped == 0 { String::new() } else { format!("; {skipped} unreadable entries skipped") }));
             }
 
             AppMsg::FilesChosen(paths) => {
@@ -613,7 +669,7 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::Clear => {
-                if self.converting {
+                if self.converting || self.scanning_iso_folders {
                     return;
                 }
                 self.entries.clear();
@@ -632,6 +688,10 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::Convert => {
+                if self.scanning_iso_folders {
+                    self.toast("Still scanning ISO folders…");
+                    return;
+                }
                 if self.converting {
                     return;
                 }
@@ -862,6 +922,7 @@ impl AppModel {
 
     fn can_convert(&self) -> bool {
         !self.converting
+            && !self.scanning_iso_folders
             && self.output_dir.is_some()
             && !self
                 .entries
@@ -917,8 +978,11 @@ impl AppModel {
         if let Some(action) = &self.add_folder_action {
             action.set_enabled(!self.converting);
         }
+        if let Some(action) = &self.add_iso_folder_action {
+            action.set_enabled(!self.converting && !self.scanning_iso_folders);
+        }
         if let Some(clear) = &self.clear_button {
-            clear.set_sensitive(!self.converting && !self.entries.is_empty());
+            clear.set_sensitive(!self.converting && !self.scanning_iso_folders && !self.entries.is_empty());
         }
         if let Some(action) = &self.convert_action {
             action.set_enabled(self.can_convert());
@@ -1050,6 +1114,8 @@ impl AppModel {
         iso_filter.set_name(Some("Xbox ISO images"));
         iso_filter.add_suffix("iso");
         iso_filter.add_suffix("ISO");
+        iso_filter.add_suffix("xiso");
+        iso_filter.add_suffix("XISO");
 
         let all_filter = gtk::FileFilter::new();
         all_filter.set_name(Some("All files"));
@@ -1099,9 +1165,9 @@ impl AppModel {
 
     /// Lets the user pick game folders, each holding a default.xex (or
     /// default.xbe) with the rest of the game's files.
-    fn open_folder_dialog(&self, sender: &ComponentSender<Self>) {
+    fn open_folder_dialog(&self, sender: &ComponentSender<Self>, scan_isos: bool) {
         let mut builder = gtk::FileDialog::builder()
-            .title("Add XEX folders")
+            .title(if scan_isos { "Add ISO folders (4 levels deep)" } else { "Add XEX folders" })
             .accept_label("Add")
             .modal(true);
 
@@ -1127,7 +1193,7 @@ impl AppModel {
                 .collect();
 
             if !paths.is_empty() {
-                sender.input(AppMsg::FilesChosen(paths));
+                sender.input(if scan_isos { AppMsg::IsoFoldersChosen(paths) } else { AppMsg::FilesChosen(paths) });
             }
         });
     }

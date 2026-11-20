@@ -483,14 +483,17 @@ fn a_folder_without_an_executable_is_rejected() {
 fn the_output_folder_may_not_be_inside_the_game_folder() {
     let dir = temp_dir("folder-dest-inside");
     let game = build_game_folder(&dir, &[1_u8; 100]);
-    let dest_dir = game.join("out");
-
-    let error = convert::convert(&ConvertOptions::new(&game, &dest_dir), |_| {}).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("inside the game folder"),
-        "unexpected error: {error:#}"
-    );
-    assert!(!dest_dir.exists());
+    for dest_dir in [game.join("out"), game.join("missing").join("nested").join("out")] {
+        let error = convert::convert(&ConvertOptions::new(&game, &dest_dir), |_| {}).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("inside the game folder"),
+            "unexpected error: {error:#}"
+        );
+        assert!(!dest_dir.exists());
+    }
+    let outside = dir.join("missing").join("nested").join("out");
+    convert::convert(&ConvertOptions::new(&game, &outside), |_| {}).unwrap();
+    assert!(outside.exists());
 
     fs::remove_dir_all(&dir).unwrap();
 }

@@ -392,8 +392,10 @@ fn describe_source(
 fn ensure_dest_outside_source(source: &Path, dest_dir: &Path) -> Result<(), Error> {
     let source =
         fs::canonicalize(source).with_context(|| format!("cannot resolve {}", source.display()))?;
-    let dest = fs::canonicalize(dest_dir)
-        .or_else(|_| std::path::absolute(dest_dir))
+    // Canonicalize the nearest existing ancestor, then append the missing
+    // directory names. On Windows canonicalize returns a verbatim path,
+    // whereas absolute() alone does not; comparing them misses descendants.
+    let dest = canonicalize_new_path(dest_dir)
         .with_context(|| format!("cannot resolve {}", dest_dir.display()))?;
 
     if dest.starts_with(&source) {
@@ -404,6 +406,28 @@ fn ensure_dest_outside_source(source: &Path, dest_dir: &Path) -> Result<(), Erro
         );
     }
     Ok(())
+}
+
+fn canonicalize_new_path(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for name in missing.into_iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = ancestor.file_name() else { return Err(error); };
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Converts one ISO into the GOD layout inside `options.dest_dir`.

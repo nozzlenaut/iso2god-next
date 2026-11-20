@@ -201,3 +201,6 @@ The integration tests build a tiny synthetic Xbox image (and a matching game fol
 iso2god-next is a fork of [iso2god-rs](https://github.com/iliazeus/iso2god-rs) by Ilia Pozdnyakov, which is itself a rewrite of [iso2god-cli](https://github.com/eliecharra/iso2god-cli) by Elie Charra. The core conversion code comes from there; the desktop app, FTP upload and the reorganised library are new in this fork.
 
 Released under the [MIT licence](LICENSE).
+
+### Bulk ISO folder import (performance fork)
+Use **Add ISO Folder** (Ctrl+Alt+O) and select one or more folders. The app finds .iso and .xiso images directly inside each selected folder and up to four subfolders deep. Existing queue entries and overlapping selections are deduplicated; symbolic links and junctions are skipped. **Add XEX Folder** remains for extracted games.
