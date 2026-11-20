@@ -511,3 +511,44 @@ fn cancelling_a_folder_conversion_leaves_no_partial_folder() {
 
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn original_xbox_multi_part_iso_has_valid_hash_chain() {
+    use iso2god_next::god::{BLOCK_SIZE, BLOCKS_PER_PART, SUBPARTS_PER_PART};
+    let dir = temp_dir("og-multipart");
+    let folder = dir.join("game");
+    fs::create_dir_all(&folder).unwrap();
+    let mut xbe = vec![0u8; 0x400];
+    xbe[..4].copy_from_slice(b"XBEH");
+    xbe[0x104..0x108].copy_from_slice(&0x10000u32.to_le_bytes());
+    xbe[0x118..0x11c].copy_from_slice(&0x10200u32.to_le_bytes());
+    xbe[0x208..0x20c].copy_from_slice(&TITLE_ID.to_le_bytes());
+    xbe[0x2b0..0x2b4].copy_from_slice(&1u32.to_le_bytes());
+    fs::write(folder.join("default.xbe"), &xbe).unwrap();
+    let payload = fs::File::create(folder.join("payload.bin")).unwrap();
+    payload.set_len(BLOCKS_PER_PART * BLOCK_SIZE + 4096).unwrap();
+    drop(payload);
+    let image = FolderImage::scan(&folder).unwrap();
+    let iso = dir.join("synthetic-og.iso");
+    let mut out = fs::File::create(&iso).unwrap();
+    std::io::copy(&mut image.open(), &mut out).unwrap();
+    drop(out);
+    let dest = dir.join("out");
+    let info = convert::inspect(&iso).unwrap();
+    assert_eq!(info.content_type, ContentType::XboxOriginal);
+    assert_eq!(info.part_count, 2);
+    let mut options = ConvertOptions::new(&iso, &dest);
+    options.num_threads = 2;
+    convert::convert(&options, |_| {}).unwrap();
+    let data_dir = info.data_dir_path(&dest);
+    let mut first = [0u8; 4096];
+    let mut second = [0u8; 4096];
+    fs::File::open(data_dir.join("Data0000")).unwrap().read_exact(&mut first).unwrap();
+    fs::File::open(data_dir.join("Data0001")).unwrap().read_exact(&mut second).unwrap();
+    let chain_offset = SUBPARTS_PER_PART as usize * 20;
+    assert_eq!(&first[chain_offset..chain_offset+20], sha1::Sha1::digest(second).as_slice());
+    let header = fs::read(info.con_header_file_path(&dest)).unwrap();
+    assert_eq!(&header[0x37d..0x391], sha1::Sha1::digest(first).as_slice());
+    assert_eq!(info.package_relative_path(), PathBuf::from("415607F7").join("00005000"));
+    fs::remove_dir_all(dir).unwrap();
+}

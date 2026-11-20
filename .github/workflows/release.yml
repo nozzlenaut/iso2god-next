@@ -22,6 +22,7 @@ env:
 
 jobs:
   linux:
+    if: github.ref_name != 'ci-performance'
     name: Linux AppImage (${{matrix.arch}})
     # The GUI needs libadwaita 1.5+, which first shipped in Ubuntu 24.04, so
     # the AppImage runs on distributions with glibc 2.39 or newer.
@@ -170,6 +171,9 @@ jobs:
             mingw-w64-ucrt-x86_64-librsvg
             mingw-w64-ucrt-x86_64-adwaita-icon-theme
 
+      - name: Test conversion and fallback
+        run: cargo test --locked --lib --test convert
+
       - name: Build
         run: cargo build --release --locked -p iso2god-next-gui
 
@@ -232,6 +236,13 @@ jobs:
           zip -qr "out/$dist.zip" "$dist"
           ls -l out
 
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso2god-next-windows-x86_64
+          path: out/*.zip
+          if-no-files-found: error
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
@@ -241,6 +252,7 @@ jobs:
           fail_on_unmatched_files: false
 
   macos:
+    if: github.ref_name != 'ci-performance'
     name: macOS (${{matrix.arch}})
     timeout-minutes: 30
     runs-on: ${{matrix.runner}}

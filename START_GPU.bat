@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "ISO2GOD_GPU=1"
+set "ISO2GOD_GPU=hybrid"
 set "ISO2GOD_GPU_LOG=%TEMP%\ISO2GOD-GPU.log"
 > "%ISO2GOD_GPU_LOG%" echo GPU mode requested. The selected device will appear after conversion begins.
 echo GPU status log: %ISO2GOD_GPU_LOG%

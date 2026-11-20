@@ -9,6 +9,7 @@ __kernel void sha1_blocks(__global const uchar *input, __global uchar *output) {
     // 64 data chunks + one full padding chunk (4096 * 8 bits).
     for (uint chunk=0; chunk<65; ++chunk) {
         uint w[16];
+        #pragma unroll 16
         for (uint j=0; j<16; ++j) {
             if (chunk==64) {
                 w[j] = j==0 ? 0x80000000U : (j==15 ? 32768U : 0U);
@@ -18,6 +19,7 @@ __kernel void sha1_blocks(__global const uchar *input, __global uchar *output) {
             }
         }
         uint a=h0,b=h1,c=h2,d=h3,e=h4;
+        #pragma unroll 80
         for (uint t=0;t<80;++t) {
             if(t>=16) w[t&15]=rol(w[(t-3)&15]^w[(t-8)&15]^w[(t-14)&15]^w[t&15],1U);
             uint f,k;

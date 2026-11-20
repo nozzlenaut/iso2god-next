@@ -34,12 +34,30 @@ pub fn write_part<R: Read + Seek, W: Write + Seek>(
 /// Writes one part file, reporting copied bytes through `on_bytes` and checking
 /// `cancelled` between subparts so long conversions can be stopped promptly.
 pub fn write_part_observed<R, W, P, C>(
+    data_volume: R,
+    part_index: u64,
+    part_file: W,
+    on_bytes: P,
+    cancelled: C,
+) -> Result<(), Error>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+    P: FnMut(u64),
+    C: FnMut() -> bool,
+{
+    write_part_with_mht(data_volume, part_index, part_file, on_bytes, cancelled).map(|_| ())
+}
+
+/// Also return the already-computed master hash table so the conversion
+/// pipeline never needs to reopen a part to read that table.
+pub(crate) fn write_part_with_mht<R, W, P, C>(
     mut data_volume: R,
     part_index: u64,
     mut part_file: W,
     mut on_bytes: P,
     mut cancelled: C,
-) -> Result<(), Error>
+) -> Result<HashList, Error>
 where
     R: Read + Seek,
     W: Write + Seek,
@@ -55,21 +73,32 @@ where
 
     // Keep the bytes we just hashed instead of seeking back and reading them
     // a second time. Batch multiple subparts for more GPU work per dispatch.
-    let mut batch = Vec::with_capacity(SUBPART_SIZE as usize * block_hash::BATCH_SUBPARTS);
+    let batch_subparts = block_hash::batch_subparts();
+    // Allocate and initialize once; reuse the same storage without clearing,
+    // re-growing or copying the payload to make room for the hash tables.
+    let mut batch = vec![0u8; SUBPART_SIZE as usize * batch_subparts];
     let mut remaining = SUBPARTS_PER_PART as usize;
     while remaining > 0 {
         if cancelled() {
             return Err(Cancelled.into());
         }
-        let n = remaining.min(block_hash::BATCH_SUBPARTS);
-        let limit = SUBPART_SIZE * n as u64;
-        batch.clear();
-        data_volume.by_ref().take(limit).read_to_end(&mut batch)?;
-        if batch.is_empty() {
+        let n = remaining.min(batch_subparts);
+        let limit = SUBPART_SIZE as usize * n;
+        let mut bytes_read = 0;
+        while bytes_read < limit {
+            match data_volume.read(&mut batch[bytes_read..limit]) {
+                Ok(0) => break,
+                Ok(n) => bytes_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if bytes_read == 0 {
             break;
         }
-        let hashes = block_hash::hashes(&batch);
-        for (subpart, hash_group) in batch.chunks(SUBPART_SIZE as usize)
+        let data = &batch[..bytes_read];
+        let hashes = block_hash::hashes(data);
+        for (subpart, hash_group) in data.chunks(SUBPART_SIZE as usize)
             .zip(hashes.chunks(BLOCKS_PER_SUBPART as usize))
         {
             if cancelled() {
@@ -84,7 +113,7 @@ where
             part_file.write_all(subpart)?;
             on_bytes(subpart.len() as u64);
         }
-        if batch.len() < limit as usize {
+        if bytes_read < limit {
             break;
         }
         remaining -= n;
@@ -93,7 +122,7 @@ where
     part_file.seek(SeekFrom::Start(master_hash_list_position))?;
     master_hash_list.write(&mut part_file)?;
 
-    Ok(())
+    Ok(master_hash_list)
 }
 
 // Independent reference implementation: reads each original subpart twice,
@@ -126,7 +155,8 @@ mod performance_tests {
         for size in [0, 1, 4095, 4096, 4097, SUBPART_SIZE as usize - 1,
             SUBPART_SIZE as usize, SUBPART_SIZE as usize + 1,
             SUBPART_SIZE as usize * 8 - 1, SUBPART_SIZE as usize * 8,
-            SUBPART_SIZE as usize * 9 + 123] {
+            SUBPART_SIZE as usize * 9 + 123,
+            SUBPART_SIZE as usize * 32 + 1] {
             let data: Vec<u8> = (0..size).map(|n| ((n*17+n/139)%253) as u8).collect();
             let mut actual = Cursor::new(Vec::new());
             write_part(Cursor::new(&data), 0, &mut actual).unwrap();

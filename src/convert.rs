@@ -99,6 +99,12 @@ impl ConvertOptions {
 
 /// A sensible default for frontends that don't expose thread tuning.
 pub fn default_num_threads() -> usize {
+    // Useful when output is a USB stick/HDD, or when testing GPU-only mode.
+    if let Ok(threads) = std::env::var("ISO2GOD_THREADS") {
+        if let Ok(threads) = threads.parse::<usize>() {
+            return threads.clamp(1, 32);
+        }
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -468,7 +474,7 @@ where
         total: total_bytes,
     });
 
-    let write_result = (0..part_count).into_par_iter().try_for_each(|part_index| {
+    let write_result: Result<Vec<god::HashList>, Error> = (0..part_count).into_par_iter().map(|part_index| {
         if cancel.is_cancelled() {
             bail!(Cancelled);
         }
@@ -498,9 +504,9 @@ where
                 data_volume
                     .seek(SeekFrom::Start(*root_offset))
                     .context("cannot seek to the start of the data volume")?;
-                god::write_part_observed(data_volume, part_index, part_file, on_bytes, is_cancelled)
+                god::write_part_with_mht(data_volume, part_index, part_file, on_bytes, is_cancelled)
             }
-            Volume::Folder(image) => god::write_part_observed(
+            Volume::Folder(image) => god::write_part_with_mht(
                 image.open(),
                 part_index,
                 part_file,
@@ -508,15 +514,19 @@ where
                 is_cancelled,
             ),
         }
-        .with_context(|| format!("error writing part {part_index}"))?;
+        .with_context(|| format!("error writing part {part_index}"))
+    }).collect();
 
-        Ok::<_, Error>(())
-    });
-
-    if let Err(error) = write_result {
-        discard_if_cancelled(cancel, &file_layout);
-        return Err(error);
-    }
+    // Indexed parallel collection preserves the part order, even if workers
+    // finish out of order. Each 4 KiB table is retained in RAM instead of read
+    // back from the destination, which is especially useful on slow disks.
+    let mut tables = match write_result {
+        Ok(tables) => tables,
+        Err(error) => {
+            discard_if_cancelled(cancel, &file_layout);
+            return Err(error);
+        }
+    };
 
     if discard_if_cancelled(cancel, &file_layout) {
         bail!(Cancelled);
@@ -528,16 +538,14 @@ where
         total: part_count,
     });
 
-    let mut mht =
-        read_part_mht(&file_layout, part_count - 1).context("error reading the part file MHT")?;
+    let mut mht = tables.pop().context("missing final part MHT")?;
 
     for (index, prev_part_index) in (0..part_count - 1).rev().enumerate() {
         if discard_if_cancelled(cancel, &file_layout) {
             bail!(Cancelled);
         }
 
-        let mut prev_mht = read_part_mht(&file_layout, prev_part_index)
-            .context("error reading the part file MHT")?;
+        let mut prev_mht = tables.pop().context("missing previous part MHT")?;
         prev_mht.add_hash(&mht.digest());
         write_part_mht(&file_layout, prev_part_index, &prev_mht)
             .context("error writing the part file MHT")?;
@@ -635,13 +643,6 @@ fn ensure_empty_dir(path: &Path) -> Result<(), Error> {
     }
     fs::create_dir_all(path)?;
     Ok(())
-}
-
-fn read_part_mht(file_layout: &FileLayout, part_index: u64) -> Result<god::HashList, Error> {
-    let mut part_file = File::options()
-        .read(true)
-        .open(file_layout.part_file_path(part_index))?;
-    god::HashList::read(&mut part_file)
 }
 
 fn write_part_mht(

@@ -1,7 +1,16 @@
 //! Experimental OpenCL acceleration. All output remains standard SHA-1.
 use sha1::{Digest, Sha1};
 
-pub(super) const BATCH_SUBPARTS: usize = 8;
+const CPU_BATCH_SUBPARTS: usize = 8;
+#[cfg(feature = "gpu")]
+const GPU_BATCH_SUBPARTS: usize = 32;
+pub(super) fn batch_subparts() -> usize {
+    #[cfg(feature = "gpu")]
+    if matches!(std::env::var("ISO2GOD_GPU").as_deref(), Ok("1" | "hybrid")) {
+        return GPU_BATCH_SUBPARTS;
+    }
+    CPU_BATCH_SUBPARTS
+}
 const BLOCK_BYTES: usize = super::BLOCK_SIZE as usize;
 
 fn cpu_hashes(data: &[u8]) -> Vec<[u8; 20]> {
@@ -29,7 +38,7 @@ mod opencl {
     };
     use std::{ptr, sync::{Mutex, OnceLock}};
 
-    const CAPACITY: usize = super::super::SUBPART_SIZE as usize * BATCH_SUBPARTS;
+    const CAPACITY: usize = super::super::SUBPART_SIZE as usize * GPU_BATCH_SUBPARTS;
     static GPU: OnceLock<Mutex<Option<GpuHasher>>> = OnceLock::new();
 
     fn report(message: &str) {
@@ -67,8 +76,27 @@ mod opencl {
             let output = unsafe { Buffer::create(&context, CL_MEM_WRITE_ONLY, CAPACITY / BLOCK_BYTES * 20, ptr::null_mut())? };
             let mut gpu = Self { input, output, kernel, queue, _program: program, _context: context };
             // Fail closed on an incorrect kernel or device result before converting anything.
-            let sample: Vec<u8> = (0..(BLOCK_BYTES*5)).map(|i| ((i*73 + i/256) % 251) as u8).collect();
+            let sample: Vec<u8> = (0..(BLOCK_BYTES*257))
+                .map(|i| ((i*73 + i/256) % 251) as u8).collect();
             ensure!(gpu.run(&sample)? == cpu_hashes(&sample), "GPU SHA-1 self-test failed");
+            // A representative dispatch catches large-batch issues and includes
+            // the upload/download cost in the actual speed comparison.
+            let sample: Vec<u8> = (0..CAPACITY)
+                .map(|i| ((i*73 + i/256 + i/4096) % 251) as u8).collect();
+            let start = std::time::Instant::now();
+            let expected = cpu_hashes(&sample);
+            let cpu_time = start.elapsed();
+            let start = std::time::Instant::now();
+            let actual = gpu.run(&sample)?;
+            let gpu_time = start.elapsed();
+            ensure!(actual == expected, "GPU full-batch SHA-1 self-test failed");
+            report(&format!("ISO2GOD: {}: CPU {:.1} MiB/s, GPU {:.1} MiB/s (hashing and transfers)",
+                device.name().unwrap_or_default(),
+                CAPACITY as f64 / 1048576.0 / cpu_time.as_secs_f64(),
+                CAPACITY as f64 / 1048576.0 / gpu_time.as_secs_f64()));
+            if std::env::var("ISO2GOD_GPU").as_deref() == Ok("hybrid") {
+                ensure!(gpu_time < cpu_time, "GPU did not beat one CPU worker in calibration; CPU selected");
+            }
             report(&format!("ISO2GOD: OpenCL SHA-1 enabled on {}", device.name().unwrap_or_default()));
             Ok(gpu)
         }
@@ -97,16 +125,40 @@ mod opencl {
     }
 
     pub(super) fn try_hashes(data: &[u8]) -> Option<Vec<[u8; 20]>> {
-        if std::env::var("ISO2GOD_GPU").ok().as_deref() != Some("1") {
+        let hybrid = match std::env::var("ISO2GOD_GPU").as_deref() {
+            Ok("hybrid") => true,
+            Ok("1") => false,
+            _ => return None,
+        };
+        // A tiny tail is cheaper on the CPU than a GPU dispatch.
+        if data.len() < BLOCK_BYTES * 128 {
             return None;
         }
         // A single reusable device queue and buffers; CPU workers retain parallel I/O.
-        let mut gpu = GPU.get_or_init(|| Mutex::new(match GpuHasher::new() {
+        let gpu = GPU.get_or_init(|| Mutex::new(match GpuHasher::new() {
             Ok(gpu) => Some(gpu),
             Err(e) => { report(&format!("ISO2GOD: GPU unavailable, using CPU: {e:#}")); None }
-        })).lock().ok()?;
+        }));
+        // In hybrid mode, never stall a CPU worker behind a busy GPU.
+        // It hashes its own batch while the GPU handles another worker's batch.
+        let mut gpu = if hybrid { gpu.try_lock().ok()? } else { gpu.lock().ok()? };
         match gpu.as_mut()?.run(data) {
-            Ok(hashes) => Some(hashes),
+            Ok(hashes) => {
+                // Cheap sanity check of real data on every GPU dispatch; the
+                // full-batch self-test above verifies every hash at startup.
+                let mid = hashes.len()/2;
+                let offset = mid * BLOCK_BYTES;
+                let expected: [u8;20] = Sha1::digest(
+                    &data[offset..(offset+BLOCK_BYTES).min(data.len())]
+                ).into();
+                if hashes[mid] == expected {
+                    Some(hashes)
+                } else {
+                    report("ISO2GOD: GPU returned wrong SHA-1, disabling GPU and rehashing on CPU");
+                    *gpu = None;
+                    None
+                }
+            },
             Err(e) => {
                 report(&format!("ISO2GOD: GPU failed, using CPU: {e:#}"));
                 *gpu = None;
